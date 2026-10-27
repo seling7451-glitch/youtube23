@@ -1,424 +1,200 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:just_audio/just_audio.dart';
-import 'package:just_audio_background/just_audio_background.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:youtube_explode_dart/youtube_explode_dart.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await JustAudioBackground.init(
-    androidNotificationChannelId: 'com.personal.youtube_audio.playback',
-    androidNotificationChannelName: 'Audio playback',
-    androidNotificationChannelDescription: 'YouTube audio playback controls',
-    androidNotificationOngoing: true,
-  );
-  runApp(const YouTubeAudioApp());
+void main() {
+  runApp(const YouTubeBrowserApp());
 }
 
-class YouTubeAudioApp extends StatelessWidget {
-  const YouTubeAudioApp({super.key});
+class YouTubeBrowserApp extends StatelessWidget {
+  const YouTubeBrowserApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'YouTube Audio',
+      title: 'YouTube Browser',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.red),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFFFF0033),
+        ),
         useMaterial3: true,
       ),
-      home: const PlayerPage(),
+      home: const YouTubeHomePage(),
     );
   }
 }
 
-class _Track {
-  const _Track({
-    required this.id,
-    required this.title,
-    required this.author,
-    required this.thumbnail,
-    required this.streamUrl,
-  });
-
-  final String id;
-  final String title;
-  final String author;
-  final Uri thumbnail;
-  final Uri streamUrl;
-}
-
-class PlayerPage extends StatefulWidget {
-  const PlayerPage({super.key});
+class YouTubeHomePage extends StatefulWidget {
+  const YouTubeHomePage({super.key});
 
   @override
-  State<PlayerPage> createState() => _PlayerPageState();
+  State<YouTubeHomePage> createState() => _YouTubeHomePageState();
 }
 
-class _PlayerPageState extends State<PlayerPage> {
-  final TextEditingController _urlController = TextEditingController();
-  final AudioPlayer _player = AudioPlayer();
-  final YoutubeExplode _youtube = YoutubeExplode();
-  final List<String> _queue = <String>[];
-
-  StreamSubscription<ProcessingState>? _processingSubscription;
-  StreamSubscription<PlayerException>? _errorSubscription;
-  String _status = 'YouTube havolasini yoki video ID sini kiriting.';
-  _Track? _currentTrack;
-  bool _isLoading = false;
-  bool _isAdvancingQueue = false;
+class _YouTubeHomePageState extends State<YouTubeHomePage> {
+  late final WebViewController _controller;
+  bool _isLoading = true;
+  String? _loadError;
 
   @override
   void initState() {
     super.initState();
-    unawaited(_requestNotificationPermission());
-    _processingSubscription = _player.processingStateStream.listen((state) {
-      if (state == ProcessingState.completed && !_isLoading) {
-        unawaited(_playNextInQueue());
-      }
-    });
-    _errorSubscription = _player.errorStream.listen((error) {
-      if (mounted) {
-        setState(() {
-          _status = 'Ijro xatosi: ${error.message}';
-        });
-      }
-    });
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (_) {
+            if (mounted) {
+              setState(() {
+                _isLoading = true;
+                _loadError = null;
+              });
+            }
+          },
+          onPageFinished: (_) {
+            if (mounted) {
+              setState(() {
+                _isLoading = false;
+                _loadError = null;
+              });
+            }
+          },
+          onWebResourceError: (error) {
+            if (error.isForMainFrame != false && mounted) {
+              setState(() {
+                _isLoading = false;
+                _loadError =
+                    'YouTube sahifasini yuklab bo‘lmadi. Internetni tekshirib, '
+                    'qayta urinib ko‘ring.';
+              });
+            }
+          },
+        ),
+      )
+      ..loadRequest(Uri.parse('https://m.youtube.com/'));
   }
 
-  Future<void> _requestNotificationPermission() async {
-    try {
-      final status = await Permission.notification.request();
-      if (!status.isGranted && mounted) {
-        setState(() {
-          _status =
-              'Bildirishnoma ruxsati berilmadi. Fon ijrosi ishlashi mumkin, '
-              'ammo boshqaruv bildirishnomasi ko\'rinmasligi mumkin.';
-        });
-      }
-    } on Exception catch (error) {
-      if (mounted) {
-        setState(() {
-          _status = 'Bildirishnoma ruxsatini so\'rashda xato: $error';
-        });
-      }
+  Future<void> _goBack() async {
+    if (await _controller.canGoBack()) {
+      await _controller.goBack();
     }
   }
 
-  @override
-  void dispose() {
-    _urlController.dispose();
-    unawaited(_processingSubscription?.cancel());
-    unawaited(_errorSubscription?.cancel());
-    unawaited(_player.dispose());
-    _youtube.close();
-    super.dispose();
+  Future<void> _goForward() async {
+    if (await _controller.canGoForward()) {
+      await _controller.goForward();
+    }
   }
 
-  String? _extractVideoId(String input) {
-    final value = input.trim();
-    final idPattern = RegExp(r'^[A-Za-z0-9_-]{11}$');
-    if (idPattern.hasMatch(value)) {
-      return value;
-    }
-
-    final uri = Uri.tryParse(
-      value.contains('://') ? value : 'https://$value',
-    );
-    if (uri == null) {
-      return null;
-    }
-
-    final host = uri.host.toLowerCase();
-    final isShortLink = host == 'youtu.be';
-    final isYouTubeHost =
-        host == 'youtube.com' || host.endsWith('.youtube.com');
-    if (!isShortLink && !isYouTubeHost) {
-      return null;
-    }
-
-    String? candidate;
-    if (isShortLink) {
-      candidate = uri.pathSegments.isEmpty ? null : uri.pathSegments.first;
-    } else if (uri.pathSegments.isNotEmpty &&
-        const <String>{'shorts', 'embed', 'live'}.contains(
-          uri.pathSegments.first,
-        )) {
-      candidate = uri.pathSegments.length > 1 ? uri.pathSegments[1] : null;
-    } else {
-      candidate = uri.queryParameters['v'];
-    }
-    return candidate != null && idPattern.hasMatch(candidate)
-        ? candidate
-        : null;
-  }
-
-  Future<_Track> _fetchTrack(String videoId) async {
-    final video = await _youtube.videos.get(videoId);
-    final manifest = await _youtube.videos.streams.getManifest(videoId);
-    final audioStreams = manifest.audioOnly;
-    if (audioStreams.isEmpty) {
-      throw FormatException('Bu videoda audio-only oqim topilmadi.');
-    }
-    final stream = audioStreams.reduce(
-      (best, current) =>
-          current.bitrate.compareTo(best.bitrate) > 0 ? current : best,
-    );
-    return _Track(
-      id: video.id.value,
-      title: video.title,
-      author: video.author,
-      thumbnail: Uri.parse(video.thumbnails.highResUrl),
-      streamUrl: stream.url,
-    );
-  }
-
-  Future<bool> _loadAndPlay(String videoId) async {
+  Future<void> _reload() async {
     if (mounted) {
       setState(() {
         _isLoading = true;
-        _status = 'Video ma\'lumotlari va audio oqimi olinmoqda...';
+        _loadError = null;
       });
     }
-    try {
-      final track = await _fetchTrack(videoId);
-      await _player.setAudioSource(
-        AudioSource.uri(
-          track.streamUrl,
-          tag: MediaItem(
-            id: track.id,
-            title: track.title,
-            artist: track.author,
-            artUri: track.thumbnail,
-          ),
+    await _controller.reload();
+  }
+
+  Future<void> _showAbout() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Ilova haqida'),
+        content: const Text(
+          'Bu ilova YouTube’ning rasmiy mobil saytini ochadi. '
+          'Video ijrosi YouTube qoidalari va akkauntingiz imkoniyatlari '
+          'bilan boshqariladi. Ilova YouTube cheklovlarini chetlab o‘tmaydi; '
+          'ekran o‘chiq paytdagi ijro YouTube tomonidan ruxsat etilishiga '
+          'bog‘liq.',
         ),
-      );
-      if (!mounted) {
-        return false;
-      }
-      setState(() {
-        _currentTrack = track;
-        _status = 'Ijro etilmoqda: ${track.title}';
-      });
-      unawaited(_startPlayback());
-      return true;
-    } on Exception catch (error) {
-      if (mounted) {
-        setState(() {
-          _status = 'Ijro boshlanmadi: ${_describeError(error)}';
-        });
-      }
-      return false;
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
-    }
-  }
-
-  String _describeError(Object error) {
-    if (error is FormatException) {
-      return error.message.toString();
-    }
-    return 'Tarmoq yoki YouTube xatosi. Internetni tekshirib, qayta urinib '
-        'ko\'ring. ($error)';
-  }
-
-  Future<void> _startPlayback() async {
-    try {
-      await _player.play();
-    } on Exception catch (error) {
-      if (mounted) {
-        setState(() {
-          _status = 'Ijroda xato: ${_describeError(error)}';
-        });
-      }
-    }
-  }
-
-  Future<void> _playInput() async {
-    final videoId = _extractVideoId(_urlController.text);
-    if (videoId == null) {
-      setState(() {
-        _status =
-            'Noto\'g\'ri havola yoki video ID. YouTube URL yoki 11 belgili ID '
-            'kiriting.';
-      });
-      return;
-    }
-    await _loadAndPlay(videoId);
-  }
-
-  Future<void> _addToQueue() async {
-    final videoId = _extractVideoId(_urlController.text);
-    if (videoId == null) {
-      setState(() {
-        _status =
-            'Navbatga qo\'shish uchun yaroqli YouTube URL yoki video ID kiriting.';
-      });
-      return;
-    }
-    setState(() {
-      _queue.add(videoId);
-      _status = 'Navbatga qo\'shildi. Navbatda: ${_queue.length} ta video.';
-    });
-    if (_currentTrack == null ||
-        _player.processingState == ProcessingState.completed) {
-      await _playNextInQueue();
-    }
-  }
-
-  Future<void> _playNextInQueue() async {
-    if (_isAdvancingQueue || _isLoading) {
-      return;
-    }
-    var didFail = false;
-    _isAdvancingQueue = true;
-    try {
-      while (_queue.isNotEmpty && mounted) {
-        final nextId = _queue.removeAt(0);
-        final started = await _loadAndPlay(nextId);
-        if (started) {
-          return;
-        }
-        didFail = true;
-      }
-      if (mounted && !didFail && _queue.isEmpty && _currentTrack != null) {
-        setState(() {
-          _status = 'Ijro tugadi. Navbat bo\'sh.';
-        });
-      }
-    } finally {
-      _isAdvancingQueue = false;
-    }
-  }
-
-  Future<void> _togglePlayback(bool isPlaying) async {
-    try {
-      if (isPlaying) {
-        await _player.pause();
-        if (mounted) {
-          setState(() {
-            _status = 'Pauza: ${_currentTrack?.title ?? ''}';
-          });
-        }
-      } else if (_currentTrack != null) {
-        unawaited(_startPlayback());
-        if (mounted) {
-          setState(() {
-            _status = 'Ijro etilmoqda: ${_currentTrack!.title}';
-          });
-        }
-      }
-    } on Exception catch (error) {
-      if (mounted) {
-        setState(() {
-          _status = 'Ijroni boshqarishda xato: ${_describeError(error)}';
-        });
-      }
-    }
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Tushunarli'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final track = _currentTrack;
+    final loadError = _loadError;
     return Scaffold(
-      appBar: AppBar(title: const Text('YouTube Audio')),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(20),
-          children: <Widget>[
-            TextField(
-              controller: _urlController,
-              keyboardType: TextInputType.url,
-              textInputAction: TextInputAction.done,
-              onSubmitted: (_) => unawaited(_playInput()),
-              decoration: const InputDecoration(
-                labelText: 'YouTube URL yoki video ID',
-                hintText: 'https://youtu.be/...',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
+      appBar: AppBar(
+        title: const Text('YouTube Browser'),
+        actions: <Widget>[
+          IconButton(
+            onPressed: () => unawaited(_showAbout()),
+            tooltip: 'Ilova haqida',
+            icon: const Icon(Icons.info_outline),
+          ),
+          IconButton(
+            onPressed: () => unawaited(_reload()),
+            tooltip: 'Yangilash',
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
+      ),
+      body: Column(
+        children: <Widget>[
+          if (_isLoading) const LinearProgressIndicator(),
+          Expanded(
+            child: Stack(
               children: <Widget>[
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: _isLoading ? null : _playInput,
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('Play'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _isLoading ? null : _addToQueue,
-                    icon: const Icon(Icons.queue_music),
-                    label: const Text('Add to queue'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    if (track != null) ...<Widget>[
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: Image.network(
-                          track.thumbnail.toString(),
-                          height: 190,
-                          width: double.infinity,
-                          fit: BoxFit.cover,
-                          errorBuilder: (context, error, stackTrace) =>
-                              const SizedBox(
-                            height: 190,
-                            child: Center(
-                              child: Icon(Icons.music_note, size: 64),
-                            ),
+                WebViewWidget(controller: _controller),
+                if (loadError != null)
+                  Positioned.fill(
+                    child: ColoredBox(
+                      color: Theme.of(context).scaffoldBackgroundColor,
+                      child: Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              const Icon(Icons.wifi_off, size: 48),
+                              const SizedBox(height: 12),
+                              Text(
+                                loadError,
+                                textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 16),
+                              FilledButton.icon(
+                                onPressed: () => unawaited(_reload()),
+                                icon: const Icon(Icons.refresh),
+                                label: const Text('Qayta urinish'),
+                              ),
+                            ],
                           ),
                         ),
                       ),
-                      const SizedBox(height: 12),
-                      Text(
-                        track.title,
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      Text(track.author),
-                      const SizedBox(height: 8),
-                    ],
-                    Text(_status),
-                    const SizedBox(height: 8),
-                    Text('Navbatda: ${_queue.length} ta video'),
-                    const SizedBox(height: 8),
-                    StreamBuilder<bool>(
-                      stream: _player.playingStream,
-                      builder: (context, snapshot) {
-                        final isPlaying = snapshot.data ?? false;
-                        return IconButton.filledTonal(
-                          onPressed: track == null || _isLoading
-                              ? null
-                              : () => _togglePlayback(isPlaying),
-                          icon: Icon(
-                            isPlaying ? Icons.pause : Icons.play_arrow,
-                          ),
-                          tooltip: isPlaying ? 'Pauza' : 'Davom ettirish',
-                        );
-                      },
                     ),
-                  ],
-                ),
-              ),
+                  ),
+              ],
             ),
-          ],
-        ),
+          ),
+          SafeArea(
+            top: false,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: <Widget>[
+                IconButton(
+                  onPressed: () => unawaited(_goBack()),
+                  tooltip: 'Orqaga',
+                  icon: const Icon(Icons.arrow_back),
+                ),
+                IconButton(
+                  onPressed: () => unawaited(_goForward()),
+                  tooltip: 'Oldinga',
+                  icon: const Icon(Icons.arrow_forward),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

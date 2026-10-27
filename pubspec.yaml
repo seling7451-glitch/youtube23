@@ -1,19 +1,16 @@
 name: youtube_audio_player
-description: Personal background audio player for YouTube.
+description: A personal browser for YouTube's official mobile website.
 publish_to: 'none'
 version: 1.0.0+1
 
 environment:
-  sdk: ^3.6.0
-  flutter: '>=3.27.0'
+  sdk: ^3.10.0
+  flutter: '>=3.38.0'
 
 dependencies:
   flutter:
     sdk: flutter
-  just_audio: ^0.10.6
-  just_audio_background: ^0.0.1-beta.17
-  permission_handler: ^13.0.2
-  youtube_explode_dart: ^3.1.0
+  webview_flutter: ^4.14.1
 
 dev_dependencies:
   flutter_test:
